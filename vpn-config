@@ -1,0 +1,61 @@
+# vpn-config
+#!/bin/bash
+
+# Exit on any error
+set -e
+
+CONFIG_DIR="$HOME/.config/openvpn-manager"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Function to save configuration
+save_config() {
+    mkdir -p "$CONFIG_DIR"
+    echo "CLIENT_OVPN=\"$1\"" > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+}
+
+# Function to load configuration
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        echo "$CLIENT_OVPN"
+    fi
+}
+
+# Function to validate OpenVPN profile
+validate_profile() {
+    local profile_path="$1"
+    if [ ! -f "$profile_path" ]; then
+        return 1
+    fi
+    if ! grep -q "^remote " "$profile_path"; then
+        return 1
+    fi
+    return 0
+}
+
+# GUI to select/edit profile location
+configure_profile() {
+    local current_profile=$(load_config)
+    local start_dir="${current_profile:-$HOME}"
+
+    while true; do
+        local profile_path=$(kdialog --title "Select OpenVPN Profile" \
+            --getopenfilename "$start_dir" "OpenVPN Profile (*.ovpn)")
+
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        if validate_profile "$profile_path"; then
+            save_config "$profile_path"
+            kdialog --msgbox "Profile configured successfully!"
+            return 0
+        else
+            kdialog --error "Invalid OpenVPN profile. Please select a valid .ovpn file."
+        fi
+    done
+}
+
+# Run configuration
+configure_profile

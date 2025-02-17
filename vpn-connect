@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Set script directory
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+CONFIG_DIR="$HOME/.config/openvpn-manager"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Check if config exists, if not run configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+    kdialog --title "First Time Setup" --msgbox "Welcome to OpenVPN Manager!\n\nLet's configure your VPN profile first."
+    "$SCRIPT_DIR/vpn-config"
+fi
+
+# Source config if it exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+else
+    kdialog --error "No VPN profile configured. Please run openvpn-manager-config"
+    exit 1
+fi
+
+# Function to get active session path
+get_active_session() {
+    openvpn3 sessions-list | grep "Path:" | awk '{print $2}'
+}
+
+# Function to get session details
+get_session_details() {
+    local session_path=$1
+    openvpn3 sessions-list | grep -A7 "$session_path" | sed 's/^[[:space:]]*//'
+}
+
+# Function to check if VPN is connected
+check_vpn_connected() {
+    local active_session=$(get_active_session)
+    if [ -n "$active_session" ]; then
+        return 0 # true
+    else
+        return 1 # false
+    fi
+}
+
+# Function to show status dialog with session details
+show_status_dialog() {
+    local title="$1"
+    local status_message="$2"
+    local session_details="$3"
+    local icon="$4"
+    local message="<html>
+        <body style='font-family: sans-serif; background-color: #2a2e32; color: #ffffff; padding: 10px;'>
+            <div style='background-color: #3daee9; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>
+                <h2 style='color: #ffffff; margin: 0;'>$status_message</h2>
+            </div>
+            <div style='background-color: #31363b; padding: 15px; border-radius: 5px; margin-top: 10px;'>
+                <pre style='color: #ffffff; margin: 0; font-family: monospace;'>
+$session_details
+                </pre>
+            </div>
+        </body>
+    </html>"
+
+    kdialog --title "$title" --icon "$icon" --msgbox "$message"
+}
+
+# Function to disconnect VPN
+disconnect_vpn() {
+    local session_path=$1
+    local session_details=$(get_session_details "$session_path")
+
+    openvpn3 session-manage --disconnect --path "$session_path"
+    if [ $? -eq 0 ]; then
+        show_status_dialog "VPN Disconnected" "VPN Connection Terminated" "$session_details" "dialog-ok"
+    else
+        show_status_dialog "Error" "Failed to Disconnect VPN" "$session_details" "dialog-error"
+    fi
+}
+
+# Function to connect VPN
+connect_vpn() {
+    # Start the OpenVPN session
+    SESSION_OUTPUT=$(openvpn3 session-start --config "$CLIENT_OVPN" 2>&1)
+    SESSION_PATH=$(echo "$SESSION_OUTPUT" | grep 'Session path' | awk '{print $3}')
+
+    if [ -z "$SESSION_PATH" ]; then
+        kdialog --error "Failed to start VPN session"
+        return 1
+    fi
+
+    # Show connecting status
+    kdialog --passivepopup "Establishing VPN connection..." 3
+
+    # Authenticate the session
+    openvpn3 session-auth --path "$SESSION_PATH" 2>/dev/null || true
+
+    # Give some time for the connection to establish
+    sleep 5
+
+    # Check the session status
+    STATUS=$(openvpn3 sessions-list)
+    SESSION_STATUS=$(echo "$STATUS" | grep -A5 "$SESSION_PATH" | grep "Status:" | sed 's/^[[:space:]]*Status:[[:space:]]*//')
+    SESSION_DETAILS=$(echo "$STATUS" | grep -A7 "$SESSION_PATH")
+
+    if echo "$SESSION_STATUS" | grep -q "Client connected"; then
+        show_status_dialog "Connection Successful" "Secure VPN Connection Established" "$SESSION_DETAILS" "dialog-ok"
+    else
+        show_status_dialog "Connection Failed" "Unable to Establish VPN Connection" "$SESSION_STATUS" "dialog-error"
+        openvpn3 session-manage --disconnect --path "$SESSION_PATH" 2>/dev/null || true
+    fi
+}
+
+# Main menu function
+show_menu() {
+    while true; do
+        local status_text=""
+        local status_icon=""
+        if check_vpn_connected; then
+            status_icon="🔒"
+            status_text="VPN Status: Connected"
+        else
+            status_icon="🔓"
+            status_text="VPN Status: Disconnected"
+        fi
+
+        local choice=$(kdialog --title "OpenVPN Manager" \
+            --menu "$status_icon $status_text" \
+            "connect" "🔒  Connect VPN" \
+            "disconnect" "🔓  Disconnect VPN" \
+            "details" "ℹ️   View Connection Details" \
+            "configure" "⚙️   Configure VPN Profile" \
+            "exit" "❌  Exit Application")
+
+        case $? in
+            0) # User made a choice
+                case $choice in
+                    "connect")
+                        if check_vpn_connected; then
+                            local active_session=$(get_active_session)
+                            kdialog --title "Warning" --warningcontinuecancel \
+                                "An active VPN connection exists.\nDo you want to disconnect it and create a new one?"
+                            if [ $? -eq 0 ]; then
+                                disconnect_vpn "$active_session"
+                                connect_vpn
+                            fi
+                        else
+                            connect_vpn
+                        fi
+                        ;;
+                    "disconnect")
+                        if check_vpn_connected; then
+                            local active_session=$(get_active_session)
+                            disconnect_vpn "$active_session"
+                        else
+                            kdialog --sorry "No active VPN connection found."
+                        fi
+                        ;;
+                    "details")
+                        if check_vpn_connected; then
+                            local active_session=$(get_active_session)
+                            local session_details=$(get_session_details "$active_session")
+                            show_status_dialog "Connection Details" "Current VPN Status" "$session_details" "network-vpn"
+                        else
+                            kdialog --sorry "No active VPN connection found."
+                        fi
+                        ;;
+                    "configure")
+                        "$SCRIPT_DIR/vpn-config"
+                        source "$CONFIG_FILE"
+                        ;;
+                    "exit")
+                        exit 0
+                        ;;
+                esac
+                ;;
+            1) # User clicked Cancel
+                exit 0
+                ;;
+        esac
+
+        # Small delay to prevent UI flicker
+        sleep 0.5
+    done
+}
+
+# Start the menu
+show_menu
